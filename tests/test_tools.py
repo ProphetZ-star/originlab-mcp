@@ -894,10 +894,10 @@ class TestToolRegressions:
         assert op.commands == [
             "win -a Graph1",
             "layer -s 2",
-            "layer.x.ticks = 3",
-            "layer.y.ticks = 3",
-            "layer.x.minor = 2",
-            "layer.y.minor = 2",
+            "layer.x.ticks = 15",  # major in+out (3) | minor in+out (12)
+            "layer.y.ticks = 15",
+            "layer.x.minorticks = 2",
+            "layer.y.minorticks = 2",
             "layer.x.ticklength = 10",
             "layer.y.ticklength = 10",
         ]
@@ -1112,7 +1112,7 @@ class TestToolRegressions:
         assert "layer -s 2" in op.commands
         assert "layer.x.label.pt = 18" in op.commands
         assert "layer.x.ticks = 3" in op.commands
-        assert "layer.x.minor = 0" in op.commands
+        assert "layer.x.minorticks = 0" in op.commands
         assert "legend.fsize = 14" in op.commands
         assert "set %C -w 1500" in op.commands
         assert "set %C -z 12" in op.commands

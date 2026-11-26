@@ -203,6 +203,11 @@ def lt_line_width(width_pt: float) -> int:
     return max(1, round(width_pt * LT_LINE_WIDTH_UNITS_PER_POINT))
 
 
+# layer.<axis>.ticks bit flags per direction (major / minor ticks).
+TICK_MAJOR_BITS = {"in": 1, "out": 2, "both": 3}
+TICK_MINOR_BITS = {"in": 4, "out": 8, "both": 12}
+
+
 def _set_tick_style_commands(
     op: Any,
     graph_name: str,
@@ -212,15 +217,21 @@ def _set_tick_style_commands(
     minor_count: int,
     show_minor: bool,
 ) -> None:
-    """用统一命令设置刻度方向和长度。"""
-    direction_map = {"in": 1, "out": 2, "both": 3}
+    """用统一命令设置刻度方向和长度。
+
+    ``layer.<axis>.ticks`` is a bit mask: 1 = major in, 2 = major out,
+    4 = minor in, 8 = minor out. ``layer.<axis>.minorticks`` is the number of
+    minor ticks between majors ("layer.x.minor" is not a LabTalk property).
+    """
     _activate_graph_layer(op, graph_name, layer_index)
     minor = minor_count if show_minor else 0
-    direction_value = direction_map[tick_direction]
-    op.lt_exec(f"layer.x.ticks = {direction_value}")
-    op.lt_exec(f"layer.y.ticks = {direction_value}")
-    op.lt_exec(f"layer.x.minor = {minor}")
-    op.lt_exec(f"layer.y.minor = {minor}")
+    ticks_value = TICK_MAJOR_BITS[tick_direction]
+    if minor > 0:
+        ticks_value |= TICK_MINOR_BITS[tick_direction]
+    op.lt_exec(f"layer.x.ticks = {ticks_value}")
+    op.lt_exec(f"layer.y.ticks = {ticks_value}")
+    op.lt_exec(f"layer.x.minorticks = {minor}")
+    op.lt_exec(f"layer.y.minorticks = {minor}")
     # layer.<axis>.ticklength is the major tick length in points (minor ticks
     # follow at half length); "majorLen" is not a LabTalk property.
     op.lt_exec(f"layer.x.ticklength = {major_length}")

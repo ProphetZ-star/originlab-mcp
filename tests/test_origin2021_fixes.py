@@ -20,7 +20,11 @@ import pytest
 from originlab_mcp.origin_manager import OriginManager
 from originlab_mcp.tools.advanced import register_advanced_tools
 from originlab_mcp.tools.analysis import fdf_param_names, register_analysis_tools
-from originlab_mcp.tools.customize import _position_legend, lt_line_width
+from originlab_mcp.tools.customize import (
+    _position_legend,
+    _set_tick_style_commands,
+    lt_line_width,
+)
 from originlab_mcp.utils.com_owner import ComOwner
 from tests.fakes import DummyMCP, FakeOrigin, attach_fake_origin
 
@@ -228,6 +232,17 @@ class TestLegendPlacement:
 
 
 class TestUnits:
+    @pytest.mark.parametrize(
+        ("direction", "show_minor", "expected"),
+        [("in", True, 5), ("out", True, 10), ("both", True, 15), ("in", False, 1), ("out", False, 2)],
+    )
+    def test_tick_bit_mask_includes_minor_ticks(self, direction, show_minor, expected) -> None:
+        op = _LegendOp({})
+        _set_tick_style_commands(op, "Graph1", 0, direction, 3, 1, show_minor)
+        assert f"layer.x.ticks = {expected}" in op.commands
+        assert f"layer.y.minorticks = {1 if show_minor else 0}" in op.commands
+        assert not any(c.startswith("layer.x.minor =") for c in op.commands)
+
     def test_line_width_points_to_labtalk_units(self) -> None:
         assert lt_line_width(1) == 500
         assert lt_line_width(0.5) == 250

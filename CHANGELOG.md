@@ -34,6 +34,7 @@
 - **`nonlinear_fit` 兼容 Origin 2021**：originpro `NLFit` 依赖的 LabTalk `GetFDFAsXML()` 在 Origin 2021 (9.8) 返回空串，导致所有内置函数报 "Invalid fitting function"；现回退到 LabTalk `nlbegin/nlfit/nlend`（同一拟合引擎），参数名从 `FitFunc/*.FDF` 读取（不区分节名大小写），结果带 `engine: "labtalk_nlfit"`
 - **线宽单位**：LabTalk `set -w` 的单位是 1/500 pt，`set_plot_line_width` / `apply_publication_style` 此前直接传点数，得到的是发丝线；现按 pt×500 换算
 - **刻度长度**：`set_tick_style` / `apply_publication_style` 改用 `layer.x/y.ticklength`（`majorLen` 不是 LabTalk 属性，设置无效）
+- **次刻度**：`layer.<axis>.ticks` 是位掩码（1 主刻度朝内、2 主刻度朝外、4 次刻度朝内、8 次刻度朝外），此前只写主刻度位，次刻度从不显示；次刻度数改用 `layer.<axis>.minorticks`（`layer.x.minor` 不是 LabTalk 属性）
 - **图例位置**：`legend.x/y` 是坐标轴单位下的图例中心，此前写入的是百分比（如 85），图例会被移出画布；现按坐标范围（对数轴在对数空间）计算，使图例边缘位于坐标框内 3%
 - **`execute_labtalk` 失败上报**：Origin 返回 `False`（脚本中有语句失败）时不再报告成功
 - **MCP 错误语义**：业务参数错误、工具执行异常与软超时的 `ok:false` JSON 保持原样，同时返回 `isError:true`；真实 stdio `ClientSession` 回归覆盖错误、成功及发现接口。SDK 保持锁定 1.26.0，声明范围收紧至 `>=1.26.0,<2`。
