@@ -113,6 +113,18 @@ def register_advanced_tools(mcp, manager) -> None:
         else:
             result = manager.execute(_exec, dispatch_timeout=timeout)
 
+        if result is False:
+            # originpro.lt_exec returns False when any statement in the script
+            # failed (bad property, missing window, ...). Do not report success.
+            return error_response(
+                message="LabTalk 命令执行失败（Origin 返回 False），脚本可能只执行了一部分。",
+                error_type="internal_error",
+                target="command",
+                value=command,
+                hint="请检查窗口/对象名与属性名是否存在；可拆分为多条命令逐条定位出错语句。",
+                suggested_alternatives=["list_graphs", "list_worksheets", "get_labtalk_variable"],
+            )
+
         warnings = [
             "此操作通过逃生舱（execute_labtalk）执行，不属于标准调用路径。",
             "执行结果可能影响 Origin 内部状态，建议后续用 list_worksheets / list_graphs 确认当前状态。",

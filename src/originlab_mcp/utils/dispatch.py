@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Final, TypeVar
 
@@ -75,14 +75,51 @@ def resolve_dispatch_timeout(
     return value
 
 
-def run_with_soft_timeout(budget: float | None, fn: Callable[[], T]) -> T:
+def _timeout_error(budget: float, exc: BaseException) -> ToolError:
+    err = ToolError(
+        f"Origin 在 {budget:g}s 内未响应（软超时，未强制终止 COM）。",
+        error_type="timeout",
+        target="dispatch_timeout",
+        hint=(
+            "常见原因是 Origin 弹出了模态对话框。"
+            "请切换到 Origin 窗口关闭对话框后重试；"
+            "或增大 ORIGINLAB_MCP_DISPATCH_TIMEOUT，"
+            "设为 off/0 可关闭软超时。"
+        ),
+        suggested_alternatives=["get_origin_info", "release_origin"],
+    )
+    err.__cause__ = exc
+    return err
+
+
+def run_with_soft_timeout(
+    budget: float | None,
+    fn: Callable[[], T],
+    *,
+    submit: Callable[[Callable[[], T]], Future[T]] | None = None,
+) -> T:
     """Run ``fn`` under a soft wall-clock budget.
 
     On timeout, raises ``ToolError`` and does **not** cancel ``fn`` — the COM
     call may still be blocked (e.g. modal dialog). Subsequent ``execute``
     calls wait on the COM lock only within their remaining budget; expired
     queued calls are rejected by OriginManager before invoking their callback.
+
+    ``submit`` hands ``fn`` to a long-lived owner thread (see
+    :class:`originlab_mcp.utils.com_owner.ComOwner`). Origin's COM objects are
+    bound to the thread that created them, so OriginManager always passes it;
+    the budget then only bounds how long the caller waits. Without ``submit``
+    a throwaway worker thread is used (portable helpers and tests only).
     """
+    if submit is not None:
+        future = submit(fn)
+        if budget is None or budget <= 0:
+            return future.result()
+        try:
+            return future.result(timeout=budget)
+        except FuturesTimeoutError as exc:
+            raise _timeout_error(budget, exc) from exc
+
     if budget is None or budget <= 0:
         return fn()
 
@@ -92,18 +129,7 @@ def run_with_soft_timeout(budget: float | None, fn: Callable[[], T]) -> T:
         try:
             return future.result(timeout=budget)
         except FuturesTimeoutError as exc:
-            raise ToolError(
-                f"Origin 在 {budget:g}s 内未响应（软超时，未强制终止 COM）。",
-                error_type="timeout",
-                target="dispatch_timeout",
-                hint=(
-                    "常见原因是 Origin 弹出了模态对话框。"
-                    "请切换到 Origin 窗口关闭对话框后重试；"
-                    "或增大 ORIGINLAB_MCP_DISPATCH_TIMEOUT，"
-                    "设为 off/0 可关闭软超时。"
-                ),
-                suggested_alternatives=["get_origin_info", "release_origin"],
-            ) from exc
+            raise _timeout_error(budget, exc) from exc
     finally:
         # Do not wait — a wedged COM call must not block tool teardown.
         executor.shutdown(wait=False, cancel_futures=False)

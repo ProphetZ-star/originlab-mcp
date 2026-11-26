@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import math
+from contextlib import suppress
 from typing import Any
 
 from originlab_mcp.utils.annotations import (
@@ -107,15 +109,77 @@ PUBLICATION_COLORS = (
     "#56B4E9",  # sky blue
 )
 PUBLICATION_SYMBOLS = (2, 3, 1, 4, 5, 6)
+# (horizontal, vertical) anchor of the legend inside the layer frame.
 LEGEND_POSITION_MAP = {
-    "top_left": (15, 15),
-    "top_right": (85, 15),
-    "bottom_left": (15, 85),
-    "bottom_right": (85, 85),
-    "top_center": (50, 10),
-    "bottom_center": (50, 90),
-    "right_center": (85, 50),
+    "top_left": ("left", "top"),
+    "top_right": ("right", "top"),
+    "bottom_left": ("left", "bottom"),
+    "bottom_right": ("right", "bottom"),
+    "top_center": ("center", "top"),
+    "bottom_center": ("center", "bottom"),
+    "right_center": ("right", "center"),
 }
+# Gap between the legend edge and the layer frame, as a fraction of the axis.
+LEGEND_FRAME_MARGIN = 0.03
+# layer.<axis>.type values that are logarithmic (log10, ln, log2).
+_LOG_AXIS_TYPES = {2, 8, 9}
+
+
+def _lt_number(op: Any, expr: str) -> float | None:
+    with suppress(Exception):
+        value = float(op.lt_float(expr))
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _legend_axis_center(op: Any, axis: str, anchor: str) -> float | None:
+    """Legend centre (axis units) that puts its edge just inside the frame.
+
+    ``legend.x``/``legend.y`` are the legend's centre in *axis units*, and
+    ``legend.x1``/``legend.y1`` its left/top edge, so the position is computed
+    from the layer's axis range instead of being written as a percentage.
+    Logarithmic axes are handled in log space.
+    """
+    lo = _lt_number(op, f"layer.{axis}.from")
+    hi = _lt_number(op, f"layer.{axis}.to")
+    if lo is None or hi is None or lo == hi:
+        return None
+    is_log = int(_lt_number(op, f"layer.{axis}.type") or 1) in _LOG_AXIS_TYPES
+    if is_log and (lo <= 0 or hi <= 0):
+        is_log = False
+
+    def to_t(v: float) -> float:
+        return math.log10(v) if is_log else v
+
+    span = to_t(hi) - to_t(lo)
+    half = 0.0
+    centre = _lt_number(op, f"legend.{axis}")
+    edge = _lt_number(op, f"legend.{axis}1")
+    if centre is not None and edge is not None and (not is_log or (centre > 0 and edge > 0)):
+        half = min(abs(to_t(centre) - to_t(edge)) / abs(span), 0.5)
+
+    low_side = "left" if axis == "x" else "bottom"
+    if anchor == "center":
+        frac = 0.5
+    elif anchor == low_side:
+        frac = LEGEND_FRAME_MARGIN + half
+    else:
+        frac = 1.0 - LEGEND_FRAME_MARGIN - half
+    value = to_t(lo) + frac * span
+    return 10**value if is_log else value
+
+
+def _position_legend(op: Any, position: str) -> dict[str, float] | None:
+    """Move the active layer's legend to a named position (inside the frame)."""
+    h_anchor, v_anchor = LEGEND_POSITION_MAP[position]
+    x = _legend_axis_center(op, "x", h_anchor)
+    y = _legend_axis_center(op, "y", v_anchor)
+    if x is None or y is None:
+        return None
+    op.lt_exec(f"legend.x = {x:.10g}")
+    op.lt_exec(f"legend.y = {y:.10g}")
+    return {"x": x, "y": y}
 
 
 def _escape_labtalk_text(value: str) -> str:
@@ -128,6 +192,15 @@ def _activate_graph_layer(op: Any, graph_name: str, layer_index: int = 0) -> Non
     safe_name = _sanitize_name(graph_name, "graph_name")
     op.lt_exec(f"win -a {safe_name}")
     op.lt_exec(f"layer -s {layer_index + 1}")
+
+
+# LabTalk "set <plot> -w" takes line width in 1/500 pt, not points.
+LT_LINE_WIDTH_UNITS_PER_POINT = 500
+
+
+def lt_line_width(width_pt: float) -> int:
+    """Convert a line width in points to LabTalk ``set -w`` units."""
+    return max(1, round(width_pt * LT_LINE_WIDTH_UNITS_PER_POINT))
 
 
 def _set_tick_style_commands(
@@ -148,8 +221,10 @@ def _set_tick_style_commands(
     op.lt_exec(f"layer.y.ticks = {direction_value}")
     op.lt_exec(f"layer.x.minor = {minor}")
     op.lt_exec(f"layer.y.minor = {minor}")
-    op.lt_exec(f"layer.x.majorLen = {major_length}")
-    op.lt_exec(f"layer.y.majorLen = {major_length}")
+    # layer.<axis>.ticklength is the major tick length in points (minor ticks
+    # follow at half length); "majorLen" is not a LabTalk property.
+    op.lt_exec(f"layer.x.ticklength = {major_length}")
+    op.lt_exec(f"layer.y.ticklength = {major_length}")
 
 
 def _set_graph_font_commands(
@@ -1261,7 +1336,7 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
 
             # 通过 LabTalk 设置线宽
             _activate_plot(op, gr.name, plot_index, layer_index)
-            op.lt_exec(f'set %C -w {width}')
+            op.lt_exec(f'set %C -w {lt_line_width(width)}')
 
             return {
                 "graph_name": target_name,
@@ -1559,10 +1634,12 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
 
             if position is not None:
                 pos_key = position.lower()
-                x_pct, y_pct = position_map[pos_key]
-                op.lt_exec(f'legend.x = {x_pct}')
-                op.lt_exec(f'legend.y = {y_pct}')
+                placed = _position_legend(op, pos_key)
                 changes["position"] = position
+                if placed is None:
+                    changes["position_applied"] = False
+                else:
+                    changes["legend_center"] = placed
 
             if font_size is not None:
                 op.lt_exec(f'legend.fsize = {font_size}')
@@ -1981,7 +2058,7 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
                     plot.shapelist = [symbol]
 
                 _activate_plot(op, gr.name, plot_index, layer_index)
-                op.lt_exec(f"set %C -w {line_width}")
+                op.lt_exec(f"set %C -w {lt_line_width(line_width)}")
                 op.lt_exec("set %C -d 1")
                 op.lt_exec(f"set %C -k {symbol}")
                 op.lt_exec(f"set %C -z {symbol_size}")
@@ -2000,9 +2077,7 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
             if legend_visible:
                 op.lt_exec("legend -r")
                 op.lt_exec("legend -s")
-                x_pct, y_pct = LEGEND_POSITION_MAP[normalized_position]
-                op.lt_exec(f"legend.x = {x_pct}")
-                op.lt_exec(f"legend.y = {y_pct}")
+                _position_legend(op, normalized_position)
                 escaped_font = _escape_labtalk_text(font_name)
                 op.lt_exec(f'legend.font$ = "{escaped_font}"')
                 op.lt_exec(f"legend.fsize = {legend_font_size}")

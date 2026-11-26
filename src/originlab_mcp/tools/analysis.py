@@ -10,6 +10,11 @@
 
 from __future__ import annotations
 
+import configparser
+import math
+import re
+from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from originlab_mcp.exceptions import (
@@ -28,6 +33,138 @@ from originlab_mcp.utils.helpers import (
 from originlab_mcp.utils.validators import (
     success_response,
 )
+
+# ---------------------------------------------------------------------------
+# LabTalk NLFit fallback
+#
+# originpro.NLFit(func) reads the function definition through the LabTalk
+# function GetFDFAsXML(), which returns an empty string on Origin 2021 (9.8),
+# so every built-in function is rejected as "Invalid fitting function". The
+# fallback drives the same Origin fitting engine through nlbegin/nlfit/nlend
+# and reads parameter names from the function's .FDF file.
+# ---------------------------------------------------------------------------
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NLFIT_TREE = "_MCP_NLFIT_TREE"
+_NLFIT_STATS = ("niter", "dof", "ssr", "chisqr", "cod", "adjr")
+
+
+def _fit_function_dirs(op: Any) -> list[Path]:
+    dirs: list[Path] = []
+    for kind in ("u", "e"):  # user functions shadow built-ins, as in Origin
+        with suppress(Exception):
+            raw = op.path(kind)
+            if raw:
+                base = Path(raw)
+                if base.suffix.lower() == ".exe":
+                    base = base.parent
+                dirs.append(base / "FitFunc")
+    return dirs
+
+
+def fdf_param_names(op: Any, function_name: str) -> list[str] | None:
+    """Parameter names from ``<FitFunc>/<name>.FDF``; None if not found."""
+    if not _IDENT_RE.match(function_name):
+        return None
+    for folder in _fit_function_dirs(op):
+        for candidate in (folder / f"{function_name}.FDF", folder / f"{function_name.upper()}.FDF"):
+            if not candidate.is_file():
+                continue
+            parser = configparser.ConfigParser(strict=False, interpolation=None)
+            with suppress(configparser.Error):
+                parser.read_string(candidate.read_text(encoding="utf-8", errors="ignore"))
+            # Section case varies between FDFs ("[Fitting Parameters]" vs
+            # "[FITTING PARAMETERS]"); option names are lower-cased by default.
+            section = next(
+                (s for s in parser.sections() if s.strip().lower() == "fitting parameters"),
+                None,
+            )
+            names = parser.get(section, "names", fallback="") if section else ""
+            return [n.strip() for n in names.split(",") if n.strip()]
+    return None
+
+
+def _sheet_range(wks: Any) -> str:
+    with suppress(Exception):
+        rng = wks.lt_range()
+        if rng:
+            return str(rng)
+    return f"[{wks.get_book().name}]{wks.name}"
+
+
+def _lt_number(op: Any, expr: str) -> float | None:
+    with suppress(Exception):
+        value = float(op.lt_float(expr))
+        if not math.isnan(value):
+            return value
+    return None
+
+
+def labtalk_nlfit(
+    op: Any,
+    wks: Any,
+    function_name: str,
+    param_names: list[str],
+    x_col: int,
+    y_col: int,
+    yerr_col: int | None,
+    initial_params: dict | None,
+    fixed_params: dict | None,
+) -> dict[str, Any]:
+    """Fit with LabTalk nlbegin/nlfit and return a flat nltree-like dict."""
+    if not param_names:
+        raise ToolError(
+            f"无法从 '{function_name}' 的 FDF 文件读取参数名",
+            error_type="unsupported",
+            target="function_name",
+            value=function_name,
+            hint="请确认该拟合函数的 .FDF 文件包含 [Fitting Parameters] Names=...。",
+        )
+    known = set(param_names)
+    for name in list(initial_params or {}) + list(fixed_params or {}):
+        if not _IDENT_RE.match(str(name)) or (known and name not in known):
+            raise ToolError(
+                f"拟合函数 '{function_name}' 没有参数 '{name}'",
+                error_type="invalid_input",
+                target="initial_params" if name in (initial_params or {}) else "fixed_params",
+                value=name,
+                hint=f"可用参数: {param_names}",
+            )
+
+    tr = _NLFIT_TREE
+    cols = f"{x_col + 1},{y_col + 1}" + (f",{yerr_col + 1}" if yerr_col is not None else "")
+    cmds = [f"nlbegin iy:={_sheet_range(wks)}!({cols}) func:={function_name} nltree:={tr}"]
+    for name, value in (initial_params or {}).items():
+        cmds.append(f"{tr}.{name}={float(value)}")
+    for name, value in (fixed_params or {}).items():
+        if value is False:
+            cmds.append(f"{tr}.f_{name}=0")
+        else:
+            cmds += [f"{tr}.{name}={float(value)}", f"{tr}.f_{name}=1"]
+    cmds.append("nlfit")
+
+    try:
+        if op.lt_exec("; ".join(cmds) + ";") is False:
+            raise FitConvergenceError(function_name, "LabTalk nlfit 执行失败")
+        result: dict[str, Any] = {}
+        for name in param_names:
+            value = _lt_number(op, f"{tr}.{name}")
+            if value is None:
+                raise FitConvergenceError(function_name, f"参数 {name} 无有效结果")
+            result[name] = value
+            err = _lt_number(op, f"{tr}.e_{name}")
+            if err is not None:
+                result[f"e_{name}"] = err
+            fixed = _lt_number(op, f"{tr}.f_{name}")
+            result[f"f_{name}"] = int(bool(fixed))
+        for stat in _NLFIT_STATS:
+            value = _lt_number(op, f"{tr}.{stat}")
+            if value is not None:
+                result[stat] = value
+        return result
+    finally:
+        with suppress(Exception):
+            op.lt_exec(f"nlend; del -vt {tr};")
 
 
 def register_analysis_tools(mcp: Any, manager: Any) -> None:
@@ -215,13 +352,34 @@ def register_analysis_tools(mcp: Any, manager: Any) -> None:
             try:
                 model = op.NLFit(function_name)
             except Exception as e:
-                raise ToolError(
-                    f"无法创建拟合模型 '{function_name}': {e}",
-                    error_type="not_found",
-                    target="function_name",
-                    value=function_name,
-                    hint="请调用 list_fit_functions 查看常用函数名，或确认 Origin 中已安装该拟合函数。",
-                ) from e
+                # Origin 2021: originpro.NLFit cannot read FDFs (GetFDFAsXML
+                # returns ""). Use LabTalk NLFit when the function exists.
+                param_names = fdf_param_names(op, function_name)
+                if param_names is None:
+                    raise ToolError(
+                        f"无法创建拟合模型 '{function_name}': {e}",
+                        error_type="not_found",
+                        target="function_name",
+                        value=function_name,
+                        hint="请调用 list_fit_functions 查看常用函数名，或确认 Origin 中已安装该拟合函数。",
+                    ) from e
+                result = labtalk_nlfit(
+                    op, wks, function_name, param_names, x_col, y_col,
+                    yerr_col, initial_params, fixed_params,
+                )
+                return {
+                    "sheet_name": target_name,
+                    "x_col": x_col,
+                    "y_col": y_col,
+                    "function_name": function_name,
+                    "engine": "labtalk_nlfit",
+                    "result": result,
+                    "parameters": {
+                        name: {"value": result[name], "error": result.get(f"e_{name}")}
+                        for name in param_names
+                    },
+                    **({"report": None} if generate_report else {}),
+                }
 
             # 设置数据
             if yerr_col is not None:
@@ -302,10 +460,19 @@ def register_analysis_tools(mcp: Any, manager: Any) -> None:
             if len(param_strs) > 4:
                 msg += f"...（共 {len(param_strs)} 个参数）"
 
+        warnings: list[str] = []
+        if result.get("engine") == "labtalk_nlfit":
+            warnings.append(
+                "originpro.NLFit 在此 Origin 版本不可用，已改用 LabTalk nlbegin/nlfit（同一拟合引擎）。"
+            )
+            if generate_report:
+                warnings.append("LabTalk 回退路径不生成拟合报告表；report 为 null。")
+
         return success_response(
             message=msg,
             data=result,
             resource=manager.get_resource_context(),
+            warnings=warnings or None,
             next_suggestions=[
                 "create_plot",
                 "export_graph",

@@ -30,6 +30,12 @@
 
 ### 🐛 Bug 修复
 
+- **COM 单线程所有者**：所有 Origin COM 调用（tools、连接/释放、空闲 detach、周期自动保存、shutdown）统一在一个长期存在的 `origin-com` 线程上执行（`utils/com_owner.py`）。此前软超时为每次调用新建线程、计时器又在其它线程访问 COM，导致 Origin 2021 上调用时好时坏（"对象没有连接到服务器"）甚至 server 崩溃；软超时现在只限制等待时间
+- **`nonlinear_fit` 兼容 Origin 2021**：originpro `NLFit` 依赖的 LabTalk `GetFDFAsXML()` 在 Origin 2021 (9.8) 返回空串，导致所有内置函数报 "Invalid fitting function"；现回退到 LabTalk `nlbegin/nlfit/nlend`（同一拟合引擎），参数名从 `FitFunc/*.FDF` 读取（不区分节名大小写），结果带 `engine: "labtalk_nlfit"`
+- **线宽单位**：LabTalk `set -w` 的单位是 1/500 pt，`set_plot_line_width` / `apply_publication_style` 此前直接传点数，得到的是发丝线；现按 pt×500 换算
+- **刻度长度**：`set_tick_style` / `apply_publication_style` 改用 `layer.x/y.ticklength`（`majorLen` 不是 LabTalk 属性，设置无效）
+- **图例位置**：`legend.x/y` 是坐标轴单位下的图例中心，此前写入的是百分比（如 85），图例会被移出画布；现按坐标范围（对数轴在对数空间）计算，使图例边缘位于坐标框内 3%
+- **`execute_labtalk` 失败上报**：Origin 返回 `False`（脚本中有语句失败）时不再报告成功
 - **MCP 错误语义**：业务参数错误、工具执行异常与软超时的 `ok:false` JSON 保持原样，同时返回 `isError:true`；真实 stdio `ClientSession` 回归覆盖错误、成功及发现接口。SDK 保持锁定 1.26.0，声明范围收紧至 `>=1.26.0,<2`。
 
 - 按 originpro 1.1.15 真实契约使用 `pages("w"/"g"/"m")`，修复列表、会话和批量导出的空结果；同步假对象契约。

@@ -898,8 +898,8 @@ class TestToolRegressions:
             "layer.y.ticks = 3",
             "layer.x.minor = 2",
             "layer.y.minor = 2",
-            "layer.x.majorLen = 10",
-            "layer.y.majorLen = 10",
+            "layer.x.ticklength = 10",
+            "layer.y.ticklength = 10",
         ]
 
     def test_set_plot_line_width_uses_requested_layer_index(self, fresh_manager):
@@ -951,7 +951,7 @@ class TestToolRegressions:
             "win -a Graph1",
             "layer -s 2",
             "layer.plot = 1",
-            "set %C -w 2",
+            "set %C -w 1000",  # LabTalk -w is 1/500 pt: 2 pt -> 1000
         ]
 
     def test_apply_publication_style_styles_plots_and_legend(self, fresh_manager):
@@ -989,6 +989,13 @@ class TestToolRegressions:
             def __init__(self):
                 self.commands = []
                 self.graph = StubGraph()
+                # axis ranges and the legend's centre/edge, in axis units
+                self.floats = {
+                    "layer.x.from": 0.0, "layer.x.to": 10.0, "layer.x.type": 1.0,
+                    "layer.y.from": 0.0, "layer.y.to": 100.0, "layer.y.type": 1.0,
+                    "legend.x": 5.0, "legend.x1": 4.0,
+                    "legend.y": 50.0, "legend.y1": 60.0,
+                }
 
             def find_graph(self, name: str) -> StubGraph:
                 assert name == "Graph1"
@@ -996,6 +1003,9 @@ class TestToolRegressions:
 
             def lt_exec(self, command: str) -> None:
                 self.commands.append(command)
+
+            def lt_float(self, expr: str) -> float:
+                return self.floats[expr]
 
         op = StubOp()
         manager.execute = MethodType(
@@ -1019,8 +1029,10 @@ class TestToolRegressions:
         assert op.graph.layer.plots[1].shapelist == [3]
         assert "layer.x.opposite = 1" in op.commands
         assert "legend -r" in op.commands
-        assert "legend.x = 85" in op.commands
-        assert "legend.y = 85" in op.commands
+        # legend.x/y are the centre in axis units: right edge 3% inside the
+        # frame (half width 1 of 10 -> 10*(1-0.03-0.1)), bottom edge 3% up.
+        assert "legend.x = 8.7" in op.commands
+        assert "legend.y = 13" in op.commands
 
     def test_apply_publication_style_uses_requested_layer_and_custom_sizes(
         self,
@@ -1102,7 +1114,7 @@ class TestToolRegressions:
         assert "layer.x.ticks = 3" in op.commands
         assert "layer.x.minor = 0" in op.commands
         assert "legend.fsize = 14" in op.commands
-        assert "set %C -w 3" in op.commands
+        assert "set %C -w 1500" in op.commands
         assert "set %C -z 12" in op.commands
 
     def test_get_labtalk_variable_reads_numeric_and_string_values(

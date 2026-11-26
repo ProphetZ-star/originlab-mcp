@@ -3,7 +3,8 @@ Origin COM 连接管理器
 
 负责：
 - 管理 Origin COM 连接（懒连接 + 自动重连）
-- 线程安全的 COM 调用（threading.Lock）
+- 线程安全的 COM 调用：所有 COM 访问都在同一个 owner 线程上执行（ComOwner），
+  并由 threading.Lock 串行化
 - 空闲超时自动释放 COM 控制权
 - 活动对象（工作表 / 图表）追踪
 - Server 关闭时的资源清理
@@ -16,11 +17,13 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from originlab_mcp.types import OriginProProtocol
+from originlab_mcp.utils.com_owner import ComOwner
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,8 @@ T = TypeVar("T")
 
 # 默认空闲超时秒数（5 分钟）
 DEFAULT_IDLE_TIMEOUT = 300
+# Shutdown/teardown waits at most this long for the COM owner thread.
+SHUTDOWN_COM_TIMEOUT = 5.0
 
 
 class OriginManager:
@@ -52,6 +57,8 @@ class OriginManager:
         auto_recover_active: bool = True,
     ) -> None:
         self._com_lock = threading.Lock()
+        # Every COM call runs on this one thread (Origin COM is thread-bound).
+        self._com_owner = ComOwner()
         self._connected = False
         self._op: OriginProProtocol | None = None
         self._auto_recover_active = auto_recover_active
@@ -105,8 +112,15 @@ class OriginManager:
         """空闲超时回调：自动 detach 释放 Origin 控制权。"""
         logger.info("空闲超时，自动释放 Origin COM 控制权...")
         self._cancel_autosave_timer()
-        with self._com_lock:
-            self._do_detach()
+
+        def _detach() -> None:
+            with self._com_lock:
+                self._do_detach()
+
+        try:
+            self._com_owner.call(_detach)
+        except Exception as exc:  # pragma: no cover - defensive (timer thread)
+            logger.warning("空闲释放失败: %s", exc)
 
     def _cancel_autosave_timer(self) -> None:
         """Cancel the periodic in-place autosave timer."""
@@ -214,7 +228,11 @@ class OriginManager:
 
         首次调用时导入 originpro 并初始化连接。
         如果已连接则跳过。release() 之后优先复用已绑定的 originpro 模块。
+        在 COM owner 线程上执行。
         """
+        self._com_owner.call(self._connect_impl)
+
+    def _connect_impl(self) -> None:
         if self._connected and self._op is not None:
             return
 
@@ -294,11 +312,15 @@ class OriginManager:
         """
         self._cancel_idle_timer()
         self._cancel_autosave_timer()
-        with self._com_lock:
-            if not self._connected or self._op is None:
-                return False
-            self._do_detach()
-            return True
+
+        def _release() -> bool:
+            with self._com_lock:
+                if not self._connected or self._op is None:
+                    return False
+                self._do_detach()
+                return True
+
+        return self._com_owner.call(_release)
 
     def disconnect(self) -> None:
         """释放 Origin COM 连接（不关闭 Origin）。
@@ -308,20 +330,28 @@ class OriginManager:
         """
         self._cancel_idle_timer()
         self._cancel_autosave_timer()
-        with self._com_lock:
-            op = self._op
-            if op is not None:
-                try:
-                    op.detach()
-                    logger.info("已断开 Origin 连接（Origin 保持运行）")
-                except Exception as e:
-                    logger.warning("断开连接时出错: %s", e)
-                finally:
-                    self._connected = False
-                    self._op = None
-                    self._project_path = None
-                    self._active_worksheet = None
-                    self._active_graph = None
+
+        def _disconnect() -> None:
+            with self._com_lock:
+                op = self._op
+                if op is not None:
+                    try:
+                        op.detach()
+                        logger.info("已断开 Origin 连接（Origin 保持运行）")
+                    except Exception as e:
+                        logger.warning("断开连接时出错: %s", e)
+                    finally:
+                        self._connected = False
+                        self._op = None
+                        self._project_path = None
+                        self._active_worksheet = None
+                        self._active_graph = None
+
+        try:
+            # Bounded: a wedged Origin (modal dialog) must not hang teardown.
+            self._com_owner.call(_disconnect, timeout=SHUTDOWN_COM_TIMEOUT)
+        except FuturesTimeoutError:
+            logger.warning("断开连接超时（Origin 可能有模态对话框），跳过 detach")
 
     def close_and_exit(self) -> None:
         """关闭 Origin 应用程序并释放连接。
@@ -330,24 +360,31 @@ class OriginManager:
         """
         self._cancel_idle_timer()
         self._cancel_autosave_timer()
-        if self._op is not None:
-            try:
-                self.ensure_connected()
-                self.op.exit()
-                logger.info("已关闭 Origin")
-            except Exception as e:
-                logger.warning("关闭 Origin 时出错: %s", e)
-            finally:
-                self._connected = False
-                self._op = None
+
+        def _exit() -> None:
+            if self._op is not None:
+                try:
+                    self._ensure_connected_impl()
+                    self.op.exit()
+                    logger.info("已关闭 Origin")
+                except Exception as e:
+                    logger.warning("关闭 Origin 时出错: %s", e)
+                finally:
+                    self._connected = False
+                    self._op = None
+
+        self._com_owner.call(_exit)
 
     def ensure_connected(self) -> None:
-        """检查连接有效性，必要时重连。"""
+        """检查连接有效性，必要时重连（在 COM owner 线程上执行）。"""
+        self._com_owner.call(self._ensure_connected_impl)
+
+    def _ensure_connected_impl(self) -> None:
         if not self._connected or self._op is None:
             logger.info("连接无效，尝试重新连接...")
             self._connected = False
             self._op = None
-            self.connect()
+            self._connect_impl()
             return
 
         # 尝试一个轻量操作来验证连接是否仍然有效
@@ -357,7 +394,7 @@ class OriginManager:
             logger.warning("Origin 连接已断开，尝试重新连接...")
             self._connected = False
             self._op = None
-            self.connect()
+            self._connect_impl()
 
     @property
     def is_connected(self) -> bool:
@@ -442,7 +479,7 @@ class OriginManager:
                         hint="请等待前一个操作完成并关闭 Origin 对话框，再重新提交。",
                     )
                 self._cancel_idle_timer()
-                self.ensure_connected()
+                self._ensure_connected_impl()
                 op = self.op
                 try:
                     return func(op, *args, **kwargs)
@@ -454,7 +491,8 @@ class OriginManager:
                 if acquired:
                     self._com_lock.release()
 
-        return run_with_soft_timeout(budget, _run)
+        # Always hop to the COM owner thread; the budget only bounds the wait.
+        return run_with_soft_timeout(budget, _run, submit=self._com_owner.submit)
 
     # -----------------------------------------------------------------
     # 活动对象追踪
@@ -681,8 +719,11 @@ class OriginManager:
         Returns
         -------
         dict
-            包含连接状态、版本、路径等信息。
+            包含连接状态、版本、路径等信息。在 COM owner 线程上执行。
         """
+        return self._com_owner.call(self._get_info_impl)
+
+    def _get_info_impl(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             "connected": self.is_connected,
             "idle_timeout": self._idle_timeout,
@@ -741,6 +782,7 @@ class OriginManager:
         self._cancel_idle_timer()
         self._cancel_autosave_timer()
         self.disconnect()
+        self._com_owner.shutdown()
         self._active_worksheet = None
         self._active_graph = None
         self._project_path = None
