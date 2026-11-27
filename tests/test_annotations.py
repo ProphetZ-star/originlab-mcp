@@ -52,7 +52,7 @@ def _tools_by_name():
 
 def test_all_tools_have_annotations():
     by_name = _tools_by_name()
-    assert len(by_name) == 67
+    assert len(by_name) == 68
     missing = [name for name, tool in by_name.items() if tool.annotations is None]
     assert missing == [], f"tools missing annotations: {missing}"
 

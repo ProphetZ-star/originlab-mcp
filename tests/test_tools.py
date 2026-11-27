@@ -1155,3 +1155,27 @@ class TestToolRegressions:
             "value": "Book1",
             "value_type": "string",
         }
+
+
+@pytest.mark.parametrize(
+    ("side", "visible", "command"),
+    [
+        ("top", False, "layer.x2.showlabel = 0"),
+        ("bottom", True, "layer.x1.showlabel = 1"),
+        ("right", False, "layer.y2.showlabel = 0"),
+        ("left", True, "layer.y1.showlabel = 1"),
+    ],
+)
+def test_set_tick_label_visibility_changes_only_the_requested_side(
+    dummy_mcp, fresh_manager, fake_origin, side, visible, command,
+):
+    graph = fake_origin.new_graph()
+    register_customize_tools(dummy_mcp, fresh_manager)
+    fake_origin.lt_commands.clear()
+
+    result = dummy_mcp.tools["set_tick_label_visibility"](
+        side=side, visible=visible, graph_name=graph.name,
+    )
+
+    assert result["ok"] is True
+    assert fake_origin.lt_commands == [f"win -a {graph.name}", "layer -s 1", command]

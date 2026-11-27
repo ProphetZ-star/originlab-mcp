@@ -62,25 +62,42 @@ def _fit_function_dirs(op: Any) -> list[Path]:
     return dirs
 
 
+def _parse_fdf(path: Path) -> tuple[str, list[str]]:
+    """(Function Name, parameter names) from an .FDF (INI) file."""
+    # FDFs carry inline "; comments"; section case varies ("[Fitting Parameters]"
+    # vs "[FITTING PARAMETERS]"); option names are lower-cased by default.
+    parser = configparser.ConfigParser(strict=False, interpolation=None, inline_comment_prefixes=(";",))
+    with suppress(configparser.Error):
+        parser.read_string(path.read_text(encoding="utf-8", errors="ignore"))
+
+    def section(name: str) -> str | None:
+        return next((s for s in parser.sections() if s.strip().lower() == name), None)
+
+    info, params = section("general information"), section("fitting parameters")
+    func = parser.get(info, "function name", fallback="").strip() if info else ""
+    names = parser.get(params, "names", fallback="") if params else ""
+    return func, [n.strip() for n in names.split(",") if n.strip()]
+
+
 def fdf_param_names(op: Any, function_name: str) -> list[str] | None:
-    """Parameter names from ``<FitFunc>/<name>.FDF``; None if not found."""
+    """Parameter names of a fit function from its .FDF file; None if not found.
+
+    Built-in FDFs often use 8.3 file names (Allometric1 -> ALLOMET1.FDF), so when
+    ``<name>.FDF`` does not exist the folder is searched by "Function Name=".
+    """
     if not _IDENT_RE.match(function_name):
         return None
+    wanted = function_name.lower()
     for folder in _fit_function_dirs(op):
         for candidate in (folder / f"{function_name}.FDF", folder / f"{function_name.upper()}.FDF"):
-            if not candidate.is_file():
-                continue
-            parser = configparser.ConfigParser(strict=False, interpolation=None)
-            with suppress(configparser.Error):
-                parser.read_string(candidate.read_text(encoding="utf-8", errors="ignore"))
-            # Section case varies between FDFs ("[Fitting Parameters]" vs
-            # "[FITTING PARAMETERS]"); option names are lower-cased by default.
-            section = next(
-                (s for s in parser.sections() if s.strip().lower() == "fitting parameters"),
-                None,
-            )
-            names = parser.get(section, "names", fallback="") if section else ""
-            return [n.strip() for n in names.split(",") if n.strip()]
+            if candidate.is_file():
+                return _parse_fdf(candidate)[1]
+        if folder.is_dir():
+            for candidate in sorted(folder.glob("*")):
+                if candidate.suffix.lower() == ".fdf" and candidate.is_file():
+                    func, names = _parse_fdf(candidate)
+                    if func.lower() == wanted:
+                        return names
     return None
 
 
@@ -98,6 +115,57 @@ def _lt_number(op: Any, expr: str) -> float | None:
         if not math.isnan(value):
             return value
     return None
+
+
+def labtalk_linfit(
+    op: Any,
+    wks: Any,
+    sheet_name: str,
+    x_col: int,
+    y_col: int,
+    fix_slope: float | None,
+    fix_intercept: float | None,
+) -> dict[str, Any]:
+    """Linear fit with the fitlr X-Function (used when originpro.LinearFit fails)."""
+    opts = []
+    if fix_intercept is not None:
+        opts += ["fixint:=1", f"intercept:={float(fix_intercept)}"]
+    if fix_slope is not None:
+        opts += ["fixslope:=1", f"slope:={float(fix_slope)}"]
+    names = {"a": "mcplra", "b": "mcplrb", "aerr": "mcplrea", "berr": "mcplreb", "r": "mcplrr", "N": "mcplrn"}
+    # outputs start as missing values (0/0) so a fit that silently did nothing cannot read as 0
+    init = " ".join(f"{v}=0/0;" for v in names.values())
+    outs = " ".join(f"{k}:={v}" for k, v in names.items())
+    cmd = f"{init} fitlr iy:={_sheet_range(wks)}!({x_col + 1},{y_col + 1}) {' '.join(opts)} {outs};"
+    if op.lt_exec(cmd) is not True:                  # originpro.lt_exec returns True on success
+        raise RuntimeError("LabTalk fitlr 执行失败")
+    val = {k: _lt_number(op, v) for k, v in names.items()}
+    if val["a"] is None or val["b"] is None:
+        raise RuntimeError("fitlr 未返回斜率/截距")
+    stats: dict[str, Any] = {}
+    if val["r"] is not None:
+        stats["R"] = val["r"]
+        stats["R2"] = val["r"] ** 2
+    if val["N"] is not None:
+        stats["N"] = val["N"]
+    result: dict[str, Any] = {
+        "sheet_name": sheet_name,
+        "x_col": x_col,
+        "y_col": y_col,
+        "method": "linear",
+        "engine": "labtalk_fitlr",
+        "parameters": {
+            "Intercept": {"value": val["a"], "error": val["aerr"]},
+            "Slope": {"value": val["b"], "error": val["berr"]},
+        },
+    }
+    if stats:
+        result["statistics"] = stats
+    if fix_slope is not None:
+        result["fixed_slope"] = fix_slope
+    if fix_intercept is not None:
+        result["fixed_intercept"] = fix_intercept
+    return result
 
 
 def labtalk_nlfit(
@@ -226,19 +294,29 @@ def register_analysis_tools(mcp: Any, manager: Any) -> None:
                 lr.fix_intercept(fix_intercept)
 
             # 执行拟合
-            if confidence_band:
-                band = 3  # 同时生成置信带和预测带
-                r, c = lr.report(band)
-                if not r or not c:
-                    raise RuntimeError("Origin 未返回拟合报告或曲线范围")
-                result = lr.result()
-                report_info = {
-                    "report_range": str(r) if r else None,
-                    "curves_range": str(c) if c else None,
-                }
-            else:
-                result = lr.result()
-                report_info = {}
+            try:
+                if confidence_band:
+                    band = 3  # 同时生成置信带和预测带
+                    r, c = lr.report(band)
+                    if not r or not c:
+                        raise RuntimeError("Origin 未返回拟合报告或曲线范围")
+                    result = lr.result()
+                    report_info = {
+                        "report_range": str(r) if r else None,
+                        "curves_range": str(c) if c else None,
+                    }
+                else:
+                    result = lr.result()
+                    report_info = {}
+            except Exception as exc:
+                # Origin 2021: originpro cannot parse the fit-result XML ("unclosed
+                # token"). Plain fits fall back to the fitlr X-Function.
+                if confidence_band or yerr_col is not None:
+                    raise
+                try:
+                    return labtalk_linfit(op, wks, target_name, x_col, y_col, fix_slope, fix_intercept)
+                except Exception:
+                    raise exc from None
 
             # 提取拟合参数
             fit_result: dict[str, Any] = {

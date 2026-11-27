@@ -11,7 +11,7 @@
     <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python">
     <img src="https://img.shields.io/badge/version-0.2.1-green.svg" alt="Version">
     <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform">
-    <img src="https://img.shields.io/badge/tools-67-orange.svg" alt="Tools">
+    <img src="https://img.shields.io/badge/tools-68-orange.svg" alt="Tools">
   </p>
   <p align="center">
     <a href="#quick-start">Quick Start</a> · <a href="#features">Features</a> · <a href="#examples">Examples</a> · <a href="#client-configuration">Client Configuration</a>
@@ -137,7 +137,7 @@ uv run originlab-mcp-ui
 
 ## Features
 
-The server provides **67 tools** covering the OriginLab data workflow.
+The server provides **68 tools** covering the OriginLab data workflow.
 
 ### Data Management (14 Tools)
 
@@ -157,13 +157,13 @@ The server provides **67 tools** covering the OriginLab data workflow.
 | Layers | `add_graph_layer` · `group_plots` |
 | Inspect | `list_graphs` · `list_graph_templates` · `get_graph_info` |
 
-### Graph Customization (25 Tools)
+### Graph Customization (26 Tools)
 
 | Category | Tools |
 | :--- | :--- |
 | Axes | `set_axis_range` · `set_axis_scale` · `set_axis_step` · `set_axis_title` |
 | Lines | `set_plot_line_style` · `set_plot_line_width` |
-| Fonts and ticks | `set_graph_font` · `set_tick_style` |
+| Fonts and ticks | `set_graph_font` · `set_tick_style` · `set_tick_label_visibility` |
 | Colors | `set_plot_color` · `set_plot_colormap` · `set_plot_transparency` |
 | Symbols | `set_plot_symbols` · `set_symbol_size` · `set_symbol_interior` |
 | Group increments | `set_color_increment` · `set_symbol_increment` |

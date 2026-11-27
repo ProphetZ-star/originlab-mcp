@@ -8,6 +8,7 @@
     set_axis_title: 设置坐标轴标题
     set_graph_font: 设置图表字体
     set_tick_style: 设置刻度样式
+    set_tick_label_visibility: 按边设置刻度标签显示
     apply_publication_style: 一键应用论文风格
     set_plot_color: 设置曲线颜色
     set_plot_colormap: 设置颜色映射
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 import math
 from contextlib import suppress
-from typing import Any
+from typing import Any, Literal
 
 from originlab_mcp.utils.annotations import (
     DESTRUCTIVE,
@@ -1011,6 +1012,17 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
         def _remove(op: Any) -> dict[str, Any]:
             gr = _find_graph(op, target_name)
             gl = _get_layer(gr, layer_index)
+            # originpro's remove_label(name) raises a TypeError when the label does not exist
+            if hasattr(gl, "label") and gl.label(label_name) is None:
+                from originlab_mcp.exceptions import ToolError
+
+                raise ToolError(
+                    f"图层 {layer_index} 中没有标签 '{label_name}'",
+                    error_type="not_found",
+                    target="label_name",
+                    value=label_name,
+                    hint="用 get_graph_info 查看图层中的对象，或忽略此错误（标签本来就不存在）。",
+                )
             gl.remove_label(label_name)
 
             return {
@@ -1872,11 +1884,58 @@ def register_customize_tools(mcp: Any, manager: Any) -> None:
             data=result,
             resource=manager.get_resource_context(),
             next_suggestions=[
+                "set_tick_label_visibility",
                 "set_graph_font",
                 "apply_publication_style",
                 "export_graph",
             ],
         )
+
+    @mcp.tool(annotations=IDEMPOTENT_MUTATING)
+    @tool_error_handler("设置刻度标签显示", "请检查图表名称、图层和轴的位置。")
+    def set_tick_label_visibility(
+        side: Literal["bottom", "top", "left", "right"],
+        visible: bool,
+        graph_name: str | None = None,
+        layer_index: int = 0,
+    ) -> dict:
+        """Show or hide tick labels on one side of a 2D graph layer.
+
+        When to use: To control tick labels independently on a selected side.
+        When not to use: To change tick marks, use set_tick_style.
+
+        The selected side's tick marks and axis line are preserved, and the
+        opposite side's tick labels keep their current visibility. If graph_name
+        is omitted, use the active graph. layer_index is zero-based.
+
+        Example: set_tick_label_visibility(side="top", visible=False).
+        """
+        axis = {"bottom": "x1", "top": "x2", "left": "y1", "right": "y2"}[side]
+        target_name = _resolve_graph_name(graph_name, manager)
+
+        def _set(op: Any) -> dict[str, Any]:
+            graph = _find_graph(op, target_name)
+            _get_layer(graph, layer_index)
+            _activate_graph_layer(op, graph.name, layer_index)
+            # Singular showlabel targets one side. Plural showLabels is a
+            # two-side bit mask, even when accessed through x2 or y2.
+            if op.lt_exec(f"layer.{axis}.showlabel = {int(visible)}") is False:
+                raise RuntimeError(f"Origin 未能设置 {side} 轴的刻度标签显示")
+            return {
+                "graph_name": graph.name,
+                "layer_index": layer_index,
+                "side": side,
+                "visible": visible,
+            }
+
+        result = manager.execute(_set)
+        return success_response(
+            message=f"已更新 {side} 轴的刻度标签显示。",
+            data=result,
+            resource=manager.get_resource_context(),
+            next_suggestions=["set_tick_style", "export_graph"],
+        )
+
 
     # =================================================================
     # apply_publication_style

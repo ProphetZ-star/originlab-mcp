@@ -120,7 +120,7 @@ def test_success_and_discovery_remain_compatible(wire_results):
     assert json.loads(result.content[0].text)["ok"] is True
     assert result.structuredContent is None
     tools = wire_results["tools"].tools
-    assert len(tools) == 67
+    assert len(tools) == 68
     for tool in tools:
         assert tool.annotations is not None
         assert tool.inputSchema["type"] == "object"

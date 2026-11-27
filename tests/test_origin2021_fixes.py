@@ -129,6 +129,10 @@ class FallbackOrigin(FakeOrigin):
     def lt_float(self, name: str) -> float:
         return float(self.lt_floats.get(name, float("nan")))
 
+    def lt_exec(self, command: str) -> bool:           # real originpro returns True on success
+        self.lt_commands.append(command)
+        return True
+
 
 @pytest.fixture
 def fallback_origin(tmp_path, fresh_manager):
@@ -148,6 +152,17 @@ class TestNonlinearFitFallback:
         mcp = DummyMCP()
         register_analysis_tools(mcp, manager)
         return mcp.tools
+
+    def test_fdf_found_by_function_name_when_file_name_differs(self, tmp_path) -> None:
+        # Origin ships Allometric1 as ALLOMET1.FDF, with an inline "; comment".
+        (tmp_path / "FitFunc").mkdir()
+        (tmp_path / "FitFunc" / "ALLOMET1.FDF").write_text(
+            "[General Information]\r\nFunction Name=Allometric1\t; name shown in the dialog\r\n"
+            "[Fitting Parameters]\r\nNames=a,b\r\n",
+            encoding="utf-8",
+        )
+        assert fdf_param_names(FallbackOrigin(tmp_path), "Allometric1") == ["a", "b"]
+        assert fdf_param_names(FallbackOrigin(tmp_path), "NoSuchFunction") is None
 
     def test_fdf_section_names_are_case_insensitive(self, tmp_path) -> None:
         # Origin 2021 ships EXPDEC1.FDF with "[FITTING PARAMETERS]".
@@ -287,3 +302,49 @@ def test_atexit_shutdown_still_detaches_on_owner_thread(tmp_path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "detached-on-owner origin-com" in proc.stdout
     assert "Traceback" not in proc.stderr
+
+
+class TestRemoveMissingLabel:
+    def test_missing_label_is_not_found(self, fresh_manager, fake_origin) -> None:
+        from originlab_mcp.tools.customize import register_customize_tools
+        from tests.fakes.origin import FakeLayer
+
+        mcp = DummyMCP()
+        register_customize_tools(mcp, fresh_manager)
+        fake_origin.new_graph()
+        FakeLayer.label = lambda self, name: None          # originpro returns None for unknown names
+        try:
+            result = mcp.tools["remove_graph_label"](label_name="Legend", graph_name="Graph1")
+        finally:
+            del FakeLayer.label
+        assert result["ok"] is False
+        assert result["error"]["type"] == "not_found"
+
+
+class TestLinearFitFallback:
+    def test_fitlr_used_when_linearfit_result_fails(self, tmp_path, fresh_manager) -> None:
+        from tests.fakes.origin import FakeLinearFit
+
+        class BrokenLinearFit(FakeLinearFit):
+            __slots__ = ()
+
+            def result(self):  # Origin 2021: originpro cannot parse the result XML
+                raise ValueError("unclosed token: line 3, column 3946")
+
+        origin = FallbackOrigin(tmp_path)
+        origin.LinearFit = lambda: BrokenLinearFit()  # type: ignore[method-assign]
+        origin.lt_floats.update({"mcplra": -12.5, "mcplrb": 13.9, "mcplrea": 0.2, "mcplreb": 0.1,
+                                 "mcplrr": 0.999, "mcplrn": 9.0})
+        attach_fake_origin(fresh_manager, origin)
+        sheet = origin.new_sheet()
+        sheet.from_list(0, [0.8, 0.85, 0.9])
+        sheet.from_list(1, [-1.4, -0.7, 0.0])
+        fresh_manager.active_worksheet = "[Book1]Sheet1"
+        mcp = DummyMCP()
+        register_analysis_tools(mcp, fresh_manager)
+        result = mcp.tools["linear_fit"](x_col=0, y_col=1, fix_intercept=0)
+        assert result["ok"] is True, result
+        assert result["data"]["engine"] == "labtalk_fitlr"
+        assert result["data"]["parameters"]["Slope"] == {"value": 13.9, "error": 0.1}
+        cmd = next(c for c in origin.lt_commands if "fitlr" in c)
+        assert "fixint:=1 intercept:=0.0" in cmd and "!(1,2)" in cmd
